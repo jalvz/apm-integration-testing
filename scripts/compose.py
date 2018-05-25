@@ -515,6 +515,14 @@ class AgentNodejsExpress(Service):
         super().__init__(**options)
         self.agent_package = options.get("nodejs_agent_package", self.DEFAULT_AGENT_PACKAGE)
 
+    @classmethod
+    def add_arguments(cls, parser):
+        super().add_arguments(parser)
+        parser.add_argument(
+            '--nodejs-agent-package',
+            default=cls.DEFAULT_AGENT_PACKAGE,
+        )
+
     def _content(self):
         return dict(
             build={"context": "docker/nodejs/express", "dockerfile": "Dockerfile"},
