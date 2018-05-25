@@ -1,3 +1,2 @@
 NODEJS_AGENT:
-  - 'elastic-apm-node'
-  - 'elastic/apm-agent-nodejs#master'
+  - 'elastic'
