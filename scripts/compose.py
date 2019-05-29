@@ -33,7 +33,7 @@ except ImportError:
 PACKAGE_NAME = 'localmanager'
 __version__ = "4.0.0"
 
-DEFAULT_STACK_VERSION = "6.3.3"
+DEFAULT_STACK_VERSION = "7.0"
 DEFAULT_APM_SERVER_URL = "http://apm-server:8200"
 
 
@@ -122,29 +122,44 @@ def curl_healthcheck(port, host="localhost", path="/healthcheck",
     }
 
 
-bcs = {}
+build_manifests = {}  # version -> manifest cache
 
 
-def resolve_bc(version, kind):
-    if kind != "latest":
-        return kind
-    if bcs.get(version):
-        return bcs[version]
-    branch = ".".join(version.split(".", 2)[:2])
-    rsp = urlopen("https://staging.elastic.co/latest/{}.json".format(branch))
+def latest_build_manifest(version):
+    minor_version = ".".join(version.split(".", 2)[:2])
+    rsp = urlopen("https://staging.elastic.co/latest/{}.json".format(minor_version))
     if rsp.code != 200:
         raise Exception("failed to query build candidates at {}: {}".format(rsp.geturl(), rsp.info()))
     encoding = "utf-8"  # python2 rsp.headers.get_content_charset("utf-8")
     info = json.load(codecs.getreader(encoding)(rsp))
     if "summary_url" in info:
-        print("found latest build candidate for {} - {}".format(version, info["summary_url"]))
-    try:
-        build_id = info["build_id"]
-        bc = build_id[build_id.rfind("-")+1:]
-        bcs[version] = bc
-        return bc
-    except Exception:
-        raise Exception("failed to find matching build in: {}".format(info))
+        print("found latest build candidate for {} - {} at {}".format(minor_version, info["summary_url"], rsp.geturl()))
+    return info["manifest_url"]
+
+
+def resolve_bc(version, build_id):
+    """construct or discover build candidate manifest url"""
+    if build_id is None:
+        return
+
+    # check cache
+    if version in build_manifests:
+        return build_manifests[version]
+
+    if build_id == "latest":
+        manifest_url = latest_build_manifest(version)
+    else:
+        manifest_url = "https://staging.elastic.co/{patch_version}-{sha}/manifest-{patch_version}.json".format(
+            patch_version=version,
+            sha=build_id,
+        )
+    rsp = urlopen(manifest_url)
+    if rsp.code != 200:
+        raise Exception("failed to fetch build manifest at {}: {}".format(rsp.geturl(), rsp.info()))
+    encoding = "utf-8"  # python2 rsp.headers.get_content_charset("utf-8")
+    manifest = json.load(codecs.getreader(encoding)(rsp))
+    build_manifests[version] = manifest  # fill cache
+    return manifest
 
 
 def parse_version(version):
@@ -203,7 +218,6 @@ class Service(object):
 
         # bc depends on version for resolution
         self._bc = resolve_bc(self._version, options.get(self.option_name() + "_bc") or options.get("bc"))
-        self.bc_old = options.get("bc_old")
 
     @property
     def bc(self):
@@ -310,30 +324,30 @@ class Service(object):
 class StackService(object):
     """Mix in for Elastic services that have public docker images built but not available in a registry [yet]"""
 
+    def build_candidate_manifest(self):
+        version = self.version
+        image = self.docker_name
+        if self.oss:
+            image += "-oss"
+        key = "{image}-{version}-docker-image.tar.gz".format(
+            image=image,
+            version=version,
+        )
+        try:
+            return self.bc["projects"][self.docker_name]["packages"][key]
+        except KeyError:
+            # help debug manifest issues
+            print(json.dumps(self.bc))
+            raise
+
     def image_download_url(self):
         # Elastic releases are public
         if self.release or not self.bc:
             return
 
-        version = self.version
-        image = self.docker_name
-        if self.oss:
-            image += "-oss"
-        base_url = "https://staging.elastic.co"
-        if self.bc_old:
-            return "{base_url}/{version}-{sha}/docker/{image}-{version}.tar.gz".format(
-                base_url=base_url,
-                sha=self.bc,
-                image=image,
-                version=version,
-            )
-        return "{base_url}/{version}-{sha}/downloads/{service}/{image}-{version}-docker-image.tar.gz".format(
-            base_url=base_url,
-            sha=self.bc,
-            image=image,
-            service=self.docker_name,
-            version=version,
-        )
+        info = self.build_candidate_manifest()
+        assert info["type"] == "docker"
+        return info["url"]
 
     @classmethod
     def add_arguments(cls, parser):
@@ -417,6 +431,24 @@ class ApmServer(StackService, Service):
         self.apm_server_monitor_port = options.get("apm_server_monitor_port", self.DEFAULT_MONITOR_PORT)
         self.apm_server_output = options.get("apm_server_output", self.DEFAULT_OUTPUT)
 
+        if options.get("apm_server_queue", "mem") == "file":
+            # enable file spool queue
+            q = {"file": {"path": "$${path.data}/spool.dat"}, "write": {}}
+            # override defaults
+            if options.get("apm_server_queue_file_size"):
+                q["file"]["size"] = options["apm_server_queue_file_size"]
+            if options.get("apm_server_queue_file_page_size"):
+                q["file"]["page_size"] = options["apm_server_queue_file_page_size"]
+            if options.get("apm_server_queue_write_buffer_size"):
+                q["write"]["buffer_size"] = options["apm_server_queue_write_buffer_size"]
+            if options.get("apm_server_queue_write_flush_events"):
+                q["write"]["flush.events"] = options["apm_server_queue_write_flush_events"]
+            if options.get("apm_server_queue_write_flush_timeout"):
+                q["write"]["flush.timeout"] = options["apm_server_queue_write_flush_timeout"]
+            if not q["write"]:
+                q.pop("write")
+            self.apm_server_command_args.append(("queue.spool", json.dumps(q)))
+
         es_urls = self.options.get("apm_server_elasticsearch_urls")
         if not es_urls:
             es_urls = ["elasticsearch:9200"]
@@ -424,7 +456,7 @@ class ApmServer(StackService, Service):
         def add_es_config(args, prefix="output"):
             """add elasticsearch configuration options."""
             default_apm_server_creds = {"username": "apm_server_user", "password": "changeme"}
-            args.append((prefix+".elasticsearch.hosts", json.dumps(es_urls)))
+            args.append((prefix + ".elasticsearch.hosts", json.dumps(es_urls)))
             for cfg in ("username", "password"):
                 es_opt = "apm_server_elasticsearch_{}".format(cfg)
                 if self.options.get(es_opt):
@@ -460,7 +492,11 @@ class ApmServer(StackService, Service):
                     ("output.logstash.hosts", "[\"logstash:5044\"]"),
                 ])
 
+        for opt in options.get("apm_server_opt", []):
+            self.apm_server_command_args.append(opt.split("=", 1))
+
         self.apm_server_count = options.get("apm_server_count", 1)
+        self.apm_server_tee = options.get("apm_server_tee", False)
 
     @classmethod
     def add_arguments(cls, parser):
@@ -493,7 +529,7 @@ class ApmServer(StackService, Service):
             '--apm-server-count',
             type=int,
             default=1,
-            help="apm-server count. >1 adds a load balancer service to round robin traffic between servers.",
+            help="apm-server count. >1 adds a load balancer service to distribute traffic between servers.",
         )
         parser.add_argument(
             '--apm-server-elasticsearch-url',
@@ -510,6 +546,38 @@ class ApmServer(StackService, Service):
             help="apm-server elasticsearch output password.",
         )
         parser.add_argument(
+            "--apm-server-queue",
+            choices=("file", "mem"),
+            default="mem",
+            help="apm-server queue type.",
+        )
+        parser.add_argument(
+            "--apm-server-queue-file-size",
+            help="apm-server file spool size (eg 128MiB).",
+        )
+        parser.add_argument(
+            "--apm-server-queue-file-page-size",
+            help="apm-server file spool page size (eg 16KiB).",
+        )
+        parser.add_argument(
+            "--apm-server-queue-write-buffer-size",
+            help="apm-server file write buffer size (eg 10MiB).",
+        )
+        parser.add_argument(
+            "--apm-server-queue-write-codec",
+            choices=("cbor", "json"),
+            default="cbor",
+            help="apm-server file write codec.",
+        )
+        parser.add_argument(
+            "--apm-server-queue-write-flush-events",
+            help="apm-server file write flush event count.",
+        )
+        parser.add_argument(
+            "--apm-server-queue-write-flush-timeout",
+            help="apm-server file write flush timeout.",
+        )
+        parser.add_argument(
             '--apm-server-secret-token',
             dest="apm_server_secret_token",
             help="apm-server secret token.",
@@ -520,6 +588,41 @@ class ApmServer(StackService, Service):
             dest="apm_server_dashboards",
             help="skip loading apm-server dashboards (setup.dashboards.enabled=false)",
         )
+        parser.add_argument(
+            '--apm-server-tee',
+            action="store_true",
+            default=False,
+            help=argparse.SUPPRESS,
+            # help="tee proxied traffic instead of load balancing.  Only for  7.0upgrade testing atm.",
+        )
+        parser.add_argument(
+            "--apm-server-opt",
+            action="append",
+            default=[],
+            help="arbitrary additional configuration to set for apm-server"
+        )
+
+    def build_candidate_manifest(self):
+        version = self.version
+        image = self.docker_name
+        if self.oss:
+            image += "-oss"
+
+        key = "{image}-{version}-docker-image.tar.gz".format(
+            image=image,
+            version=version,
+        )
+        try:
+            if key not in self.bc["projects"][self.docker_name]["packages"]:
+                key = "{image}-{version}-linux-amd64-docker-image.tar.gz".format(
+                    image=image,
+                    version=version,
+                )
+            return self.bc["projects"][self.docker_name]["packages"][key]
+        except KeyError:
+            # help debug manifest issues
+            print(json.dumps(self.bc))
+            raise
 
     def _content(self):
         command_args = []
@@ -573,12 +676,29 @@ class ApmServer(StackService, Service):
         single["ports"] = [p.rsplit(":", 1)[-1] for p in single["ports"]]
 
         # render proxy + backends
-        ren = self.render_proxy()
+        if self.apm_server_tee:
+            ren = self.render_tee()
+        else:
+            ren = self.render_proxy()
+
         # individualize each backend instance
         for i in range(1, self.apm_server_count + 1):
             backend = dict(single)
             backend["container_name"] = backend["container_name"] + "-" + str(i)
+            if self.apm_server_tee and i == 2:
+                # always build 7.0
+                backend["build"] = {
+                    "args": {
+                        "apm_server_base_image": "docker.elastic.co/apm/apm-server:7.0.0-SNAPSHOT",
+                        "apm_server_branch": "7.0",
+                        "apm_server_repo": "https://github.com/elastic/apm-server.git"
+                    },
+                    "context": "docker/apm-server"
+                }
+                backend["labels"] = ["co.elatic.apm.stack-version=7.0.0"]
+                del(backend["image"])  # use the built one instead
             ren.update({"-".join([self.name(), str(i)]): backend})
+
         return ren
 
     def render_proxy(self):
@@ -589,6 +709,21 @@ class ApmServer(StackService, Service):
             depends_on={"apm-server-{}".format(i): condition for i in range(1, self.apm_server_count + 1)},
             environment={"APM_SERVER_COUNT": self.apm_server_count},
             healthcheck={"test": ["CMD", "haproxy", "-c", "-f", "/usr/local/etc/haproxy/haproxy.cfg"]},
+            ports=[
+                self.publish_port(self.port, self.SERVICE_PORT),
+            ],
+        )
+        return {self.name(): content}
+
+    def render_tee(self):
+        condition = {"condition": "service_healthy"}
+        content = dict(
+            build={"context": "docker/apm-server/teeproxy"},
+            # TODO: support > 1 backup server
+            command=["teeproxy", "-l", "0.0.0.0:8200", "-a", "apm-server-1:8200", "-b", "apm-server-2:8200"],
+            container_name=self.default_container_name() + "-tee",
+            depends_on={"apm-server-{}".format(i): condition for i in range(1, self.apm_server_count + 1)},
+            healthcheck={"test": ["CMD", "pgrep", "teeproxy"]},
             ports=[
                 self.publish_port(self.port, self.SERVICE_PORT),
             ],
@@ -711,18 +846,107 @@ class Elasticsearch(StackService, Service):
 
 
 class BeatMixin(object):
+    DEFAULT_OUTPUT = "elasticsearch"
+    OUTPUTS = {"elasticsearch", "logstash"}
+
+    @classmethod
+    def add_arguments(cls, parser):
+        parser.add_argument(
+            "--{}-elasticsearch-url".format(cls.name()),
+            action="append",
+            dest="apm_server_elasticsearch_urls",
+            help="{} elasticsearch output url(s).".format(cls.name()),
+        )
+        parser.add_argument(
+            "--{}-elasticsearch-username".format(cls.name()),
+            help="{} elasticsearch output username.".format(cls.name()),
+        )
+        parser.add_argument(
+            "--{}-elasticsearch-password".format(cls.name()),
+            help="{} elasticsearch output password.".format(cls.name()),
+        )
+        parser.add_argument(
+            "--{}-output".format(cls.name()),
+            choices=cls.OUTPUTS,
+            default="elasticsearch",
+            help="{} output".format(cls.name()),
+        )
+
     def __init__(self, **options):
-        self.command = self.DEFAULT_COMMAND
+        self.command = list(self.DEFAULT_COMMAND)
         self.depends_on = {"elasticsearch": {"condition": "service_healthy"}} if options.get(
             "enable_elasticsearch", True) else {}
         if options.get("enable_kibana", True):
-            self.command += " -E setup.dashboards.enabled=true"
+            self.command.extend(["-E", "setup.dashboards.enabled=true"])
             self.depends_on["kibana"] = {"condition": "service_healthy"}
+        self.environment = {}
+
+        es_urls = options.get("{}_elasticsearch_urls".format(self.name()))
+        if not es_urls:
+            es_urls = ["elasticsearch:9200"]
+
+        def add_es_config(args, prefix="output"):
+            """add elasticsearch configuration options."""
+            default_beat_creds = {"username": "{}_user".format(self.name()), "password": "changeme"}
+            args.append((prefix + ".elasticsearch.hosts", json.dumps(es_urls)))
+            for cfg in ("username", "password"):
+                es_opt = "{}_elasticsearch_{}".format(self.name(), cfg)
+                if options.get(es_opt):
+                    args.append((prefix + ".elasticsearch.{}".format(cfg), options[es_opt]))
+                elif options.get("xpack_secure"):
+                    args.append((prefix + ".elasticsearch.{}".format(cfg), default_beat_creds.get(cfg)))
+
+        command_args = []
+        add_es_config(command_args)
+        beat_output = options.get("{}_output".format(self.name()), self.DEFAULT_OUTPUT)
+        if beat_output == "elasticsearch":
+            command_args.extend([("output.elasticsearch.enabled", "true")])
+        else:
+            command_args.extend([("output.elasticsearch.enabled", "false")])
+            add_es_config(command_args, prefix="xpack.monitoring")
+            if beat_output == "logstash":
+                command_args.extend([
+                    ("output.logstash.enabled", "true"),
+                    ("output.logstash.hosts", "[\"logstash:5044\"]"),
+                ])
+            elif beat_output == "kafka":
+                # disabled via command line options for now
+                command_args.extend([
+                    ("output.kafka.enabled", "true"),
+                    ("output.kafka.hosts", "[\"kafka:9092\"]"),
+                    ("output.kafka.topics", "[{default: '{}', topic: '{}'}]".format(self.name(), self.name())),
+                ])
+
+        for param, value in command_args:
+            self.command.extend(["-E", param + "=" + value])
+
         super(BeatMixin, self).__init__(**options)
+
+    def build_candidate_manifest(self):
+        version = self.version
+        image = self.docker_name
+        if self.oss:
+            image += "-oss"
+
+        key = "{image}-{version}-docker-image.tar.gz".format(
+            image=image,
+            version=version,
+        )
+        try:
+            if key not in self.bc["projects"]["beats"]["packages"]:
+                key = "{image}-{version}-linux-amd64-docker-image.tar.gz".format(
+                    image=image,
+                    version=version,
+                )
+            return self.bc["projects"]["beats"]["packages"][key]
+        except KeyError:
+            # help debug manifest issues
+            print(json.dumps(self.bc))
+            raise
 
 
 class Filebeat(BeatMixin, StackService, Service):
-    DEFAULT_COMMAND = "filebeat -e --strict.perms=false"
+    DEFAULT_COMMAND = ["filebeat", "-e", "--strict.perms=false"]
     docker_path = "beats"
 
     def __init__(self, **options):
@@ -734,6 +958,7 @@ class Filebeat(BeatMixin, StackService, Service):
         return dict(
             command=self.command,
             depends_on=self.depends_on,
+            environment=self.environment,
             labels=None,
             user="root",
             volumes=[
@@ -745,7 +970,7 @@ class Filebeat(BeatMixin, StackService, Service):
 
 
 class Heartbeat(BeatMixin, StackService, Service):
-    DEFAULT_COMMAND = "heartbeat -e --strict.perms=false"
+    DEFAULT_COMMAND = ["heartbeat", "-e", "--strict.perms=false"]
     docker_path = "beats"
 
     def __init__(self, **options):
@@ -758,6 +983,7 @@ class Heartbeat(BeatMixin, StackService, Service):
         return dict(
             command=self.command,
             depends_on=self.depends_on,
+            environment=self.environment,
             labels=None,
             user="root",
             volumes=[
@@ -804,6 +1030,17 @@ class Kibana(StackService, Service):
 class Logstash(StackService, Service):
     SERVICE_PORT = 5044
 
+    def build_candidate_manifest(self):
+        version = self.version
+        image = self.docker_name
+        if self.oss:
+            image += "-oss"
+        key = "{image}-{version}-docker-image.tar.gz".format(
+            image=image,
+            version=version,
+        )
+        return self.bc["projects"]["logstash-docker"]["packages"][key]
+
     def _content(self):
         return dict(
             depends_on={"elasticsearch": {"condition": "service_healthy"}} if self.options.get(
@@ -816,17 +1053,41 @@ class Logstash(StackService, Service):
 
 
 class Metricbeat(BeatMixin, StackService, Service):
-    DEFAULT_COMMAND = "metricbeat -e --strict.perms=false"
+    DEFAULT_COMMAND = ["metricbeat", "-e", "--strict.perms=false"]
     docker_path = "beats"
 
     def _content(self):
         return dict(
             command=self.command,
             depends_on=self.depends_on,
+            environment=self.environment,
             labels=None,
             user="root",
             volumes=[
                 "./docker/metricbeat/metricbeat.yml:/usr/share/metricbeat/metricbeat.yml",
+                "/var/run/docker.sock:/var/run/docker.sock",
+            ]
+        )
+
+
+class Packetbeat(BeatMixin, StackService, Service):
+    """Stars a Packetbeat container to grab the network traffic."""
+
+    DEFAULT_COMMAND = ["packetbeat", "-e", "--strict.perms=false", "-E", "packetbeat.interfaces.device=eth0"]
+    docker_path = "beats"
+
+    def _content(self):
+        return dict(
+            command=self.command,
+            depends_on=self.depends_on,
+            environment=self.environment,
+            labels=None,
+            user="root",
+            privileged="true",
+            cap_add=["NET_ADMIN", "NET_RAW"],
+            network_mode="service:apm-server",
+            volumes=[
+                "./docker/packetbeat/packetbeat.yml:/usr/share/packetbeat/packetbeat.yml",
                 "/var/run/docker.sock:/var/run/docker.sock",
             ]
         )
@@ -1183,6 +1444,7 @@ class AgentRubyRails(Service):
 class AgentJavaSpring(Service):
     SERVICE_PORT = 8090
     DEFAULT_AGENT_VERSION = "master"
+    DEFAULT_AGENT_RELEASE = ""
 
     @classmethod
     def add_arguments(cls, parser):
@@ -1192,10 +1454,16 @@ class AgentJavaSpring(Service):
             default=cls.DEFAULT_AGENT_VERSION,
             help='Use Java agent version (master, 0.5, v.0.7.1, ...)',
         )
+        parser.add_argument(
+            "--java-agent-release",
+            default=cls.DEFAULT_AGENT_RELEASE,
+            help='Use Java agent release version (1.6.0, 0.6.2, ...)',
+        )
 
     def __init__(self, **options):
         super(AgentJavaSpring, self).__init__(**options)
         self.agent_version = options.get("java_agent_version", self.DEFAULT_AGENT_VERSION)
+        self.agent_release = options.get("java_agent_release", self.DEFAULT_AGENT_RELEASE)
         self.depends_on = {
             "apm-server": {"condition": "service_healthy"},
         }
@@ -1211,6 +1479,7 @@ class AgentJavaSpring(Service):
                 "dockerfile": "Dockerfile",
                 "args": {
                     "JAVA_AGENT_BRANCH": self.agent_version,
+                    "JAVA_AGENT_BUILT_VERSION": self.agent_release,
                 }
             },
             container_name="javaspring",
@@ -1223,6 +1492,64 @@ class AgentJavaSpring(Service):
             },
             healthcheck=curl_healthcheck(self.SERVICE_PORT, "javaspring"),
             depends_on=self.depends_on,
+            ports=[self.publish_port(self.port, self.SERVICE_PORT)],
+        )
+
+
+class AgentDotnet(Service):
+    SERVICE_PORT = 8100
+    DEFAULT_AGENT_VERSION = "master"
+    DEFAULT_AGENT_RELEASE = ""
+
+    @classmethod
+    def add_arguments(cls, parser):
+        super(AgentDotnet, cls).add_arguments(parser)
+        parser.add_argument(
+            "--dotnet-agent-version",
+            default=cls.DEFAULT_AGENT_VERSION,
+            help='Use .NET agent version (master, 0.0.0.2, 0.0.0.1, ...)',
+        )
+        parser.add_argument(
+            "--dotnet-agent-release",
+            default=cls.DEFAULT_AGENT_RELEASE,
+            help='Use .NET agent release version (0.0.1-alpha, 0.0.2-alpha, ...)',
+        )
+
+    def __init__(self, **options):
+        super(AgentDotnet, self).__init__(**options)
+        self.agent_version = options.get("dotnet_agent_version", self.DEFAULT_AGENT_VERSION)
+        self.agent_release = options.get("dotnet_agent_release", self.DEFAULT_AGENT_RELEASE)
+        self.depends_on = {
+            "apm-server": {"condition": "service_healthy"},
+        }
+
+    @add_agent_environment([
+        ("apm_server_secret_token", "ELASTIC_APM_SECRET_TOKEN"),
+        ("apm_server_url", "ELASTIC_APM_SERVER_URLS"),
+    ])
+    def _content(self):
+        return dict(
+            build={
+                "context": "docker/dotnet",
+                "dockerfile": "Dockerfile",
+                "args": {
+                    "DOTNET_AGENT_BRANCH": self.agent_version,
+                    "DOTNET_AGENT_VERSION": self.agent_release,
+                },
+            },
+            container_name="dotnetapp",
+            environment={
+                "ELASTIC_APM_API_REQUEST_TIME": "3s",
+                "ELASTIC_APM_FLUSH_INTERVAL": "5",
+                "ELASTIC_APM_SAMPLE_RATE": "1",
+                "ELASTIC_APM_SERVICE_NAME": "dotnetapp",
+                "ELASTIC_APM_TRANSACTION_IGNORE_NAMES": "healthcheck",
+            },
+            healthcheck=curl_healthcheck(self.SERVICE_PORT, "dotnetapp"),
+            depends_on=self.depends_on,
+            image=None,
+            labels=None,
+            logging=None,
             ports=[self.publish_port(self.port, self.SERVICE_PORT)],
         )
 
@@ -1274,6 +1601,52 @@ class OpbeansService(Service):
                 dest=cls.option_name() + '_service_name',
                 help=cls.name() + " service name"
             )
+
+
+class OpbeansDotnet(OpbeansService):
+    SERVICE_PORT = 3004
+    DEFAULT_AGENT_BRANCH = "master"
+    DEFAULT_AGENT_REPO = "elastic/apm-agent-dotnet"
+    DEFAULT_SERVICE_NAME = "opbeans-dotnet"
+    DEFAULT_AGENT_VERSION = ""
+
+    @add_agent_environment([
+        ("apm_server_secret_token", "ELASTIC_APM_SECRET_TOKEN")
+    ])
+    def _content(self):
+        depends_on = {}
+        if self.options.get("enable_apm_server", True):
+            depends_on["apm-server"] = {"condition": "service_healthy"}
+        if self.options.get("enable_elasticsearch", True):
+            depends_on["elasticsearch"] = {"condition": "service_healthy"}
+
+        content = dict(
+            build=dict(
+                context="docker/opbeans/dotnet",
+                dockerfile="Dockerfile",
+                args=[
+                    "DOTNET_AGENT_BRANCH=" + (self.agent_branch or self.DEFAULT_AGENT_BRANCH),
+                    "DOTNET_AGENT_REPO=" + (self.agent_repo or self.DEFAULT_AGENT_REPO),
+                    "DOTNET_AGENT_VERSION=" + (self.agent_repo or self.DEFAULT_AGENT_VERSION),
+                ]
+            ),
+            environment=[
+                "ELASTIC_APM_SERVICE_NAME={}".format(self.service_name),
+                "ELASTIC_APM_SERVER_URLS={}".format(self.apm_server_url),
+                "ELASTIC_APM_JS_SERVER_URL={}".format(self.apm_js_server_url),
+                "ELASTIC_APM_FLUSH_INTERVAL=5",
+                "ELASTIC_APM_TRANSACTION_MAX_SPANS=50",
+                "ELASTIC_APM_SAMPLE_RATE=1",
+                "ELASTICSEARCH_URL=http://elasticsearch:9200",
+                "OPBEANS_DT_PROBABILITY={:.2f}".format(self.opbeans_dt_probability),
+            ],
+            depends_on=depends_on,
+            image=None,
+            labels=None,
+            healthcheck=curl_healthcheck(80, "opbeans-dotnet", path="/", retries=36),
+            ports=[self.publish_port(self.port, 80)],
+        )
+        return content
 
 
 class OpbeansGo(OpbeansService):
@@ -1669,10 +2042,12 @@ class LocalSetup(object):
         '6.3': '6.3.2',
         '6.4': '6.4.3',
         '6.5': '6.5.4',
-        '6.6': '6.6.1',
-        '6.7': '6.7.0',
-        '7.0': '7.0.0',
-        '7.1': '7.1.0',
+        '6.6': '6.6.2',
+        '6.7': '6.7.2',
+        '6.8': '6.8.1',
+        '7.0': '7.0.1',
+        '7.1': '7.1.1',
+        '7.2': '7.2.0',
         'master': '8.0.0',
     }
 
@@ -1781,8 +2156,8 @@ class LocalSetup(object):
             argv = sys.argv
         available_versions = ' / '.join(list(self.SUPPORTED_VERSIONS))
         help_text = (
-                "Which version of the stack to start. " +
-                "Available options: {0}".format(available_versions)
+            "Which version of the stack to start. " +
+            "Available options: {0}".format(available_versions)
         )
         parser.add_argument("stack-version", action='store', help=help_text)
 
@@ -1841,13 +2216,6 @@ class LocalSetup(object):
             default='',
         )
 
-        # Add option to use the old bc format
-        parser.add_argument(
-            '--bc-old',
-            action='store_true',
-            help='use the older build candidate path.  option to be removed soon.'
-        )
-
         # Add option to skip image downloads
         parser.add_argument(
             '--skip-download',
@@ -1896,7 +2264,23 @@ class LocalSetup(object):
         )
 
         parser.add_argument(
+            '--remove-orphans',
+            action='store_true',
+            help='remove services that no longer exist',
+            dest='remove_orphans',
+            default=False,
+        )
+
+        parser.add_argument(
             '--all',
+            action='store_true',
+            help='run all services',
+            dest='run_all',
+            default=False,
+        )
+
+        parser.add_argument(
+            '--all-opbeans',
             action='store_true',
             help='run all opbeans services',
             dest='run_all_opbeans',
@@ -2050,13 +2434,16 @@ class LocalSetup(object):
             args["version"] = self.SUPPORTED_VERSIONS.get(args["stack-version"], args["stack-version"])
 
         selections = set()
-        all_opbeans = args.get('run_all_opbeans')
+        run_all = args.get("run_all")
+        all_opbeans = args.get('run_all_opbeans') or run_all
         any_opbeans = all_opbeans or any(v and k.startswith('enable_opbeans_') for k, v in args.items())
         for service in self.services:
             service_enabled = args.get("enable_" + service.option_name())
             is_opbeans_service = issubclass(service, OpbeansService) or service is OpbeansRum
             is_opbeans_sidecar = service.name() in ('postgres', 'redis', 'opbeans-load-generator')
-            if service_enabled or (all_opbeans and is_opbeans_service) or (any_opbeans and is_opbeans_sidecar):
+            is_obs = issubclass(service, BeatMixin)
+            if service_enabled or (all_opbeans and is_opbeans_service) or (any_opbeans and is_opbeans_sidecar) or \
+                    (run_all and is_obs):
                 selections.add(service(**args))
 
         # `docker load` images if necessary, usually only for build candidates
@@ -2131,6 +2518,8 @@ class LocalSetup(object):
                 subprocess.call(docker_compose_cmd + pull_params + image_services)
             # really start
             up_params = ["up", "-d"]
+            if args["remove_orphans"]:
+                up_params.append("--remove-orphans")
             if not sys.stdin.isatty():
                 up_params.extend(["--quiet-pull"])
             subprocess.call(docker_compose_cmd + up_params)
@@ -2202,7 +2591,7 @@ class LocalSetup(object):
             server_url=self.args.apm_server_url,
         )
         cmd = "docker run --rm --network apm-integration-testing " + \
-            "-v {}:/tmp/sourcemap centos:7 ".format(sourcemap_file) + cmd
+              "-v {}:/tmp/sourcemap centos:7 ".format(sourcemap_file) + cmd
         subprocess.check_output(cmd, shell=True).decode('utf8').strip()
 
     @staticmethod

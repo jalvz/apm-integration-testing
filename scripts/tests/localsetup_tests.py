@@ -1,6 +1,5 @@
 from __future__ import print_function
 
-
 import io
 import sys
 import unittest
@@ -10,7 +9,7 @@ import yaml
 from .. import compose
 
 from ..compose import (OpbeansPython, OpbeansRum, OpbeansGo, OpbeansJava,
-                       OpbeansNode, OpbeansRuby, OpbeansLoadGenerator)
+                       OpbeansNode, OpbeansRuby, OpbeansLoadGenerator, OpbeansDotnet)
 
 from ..compose import (ApmServer, Kibana, Elasticsearch)
 
@@ -44,6 +43,46 @@ def opbeans_services():
 
 
 class OpbeansServiceTest(ServiceTest):
+    def test_opbeans_dotnet(self):
+        opbeans_go = OpbeansDotnet(version="6.3.10").render()
+        self.assertEqual(
+            opbeans_go, yaml.load("""
+                opbeans-dotnet:
+                    build:
+                      dockerfile: Dockerfile
+                      context: docker/opbeans/dotnet
+                      args:
+                        - DOTNET_AGENT_BRANCH=master
+                        - DOTNET_AGENT_REPO=elastic/apm-agent-dotnet
+                        - DOTNET_AGENT_VERSION=
+                    container_name: localtesting_6.3.10_opbeans-dotnet
+                    ports:
+                      - "127.0.0.1:3004:80"
+                    environment:
+                      - ELASTIC_APM_SERVICE_NAME=opbeans-dotnet
+                      - ELASTIC_APM_SERVER_URLS=http://apm-server:8200
+                      - ELASTIC_APM_JS_SERVER_URL=http://apm-server:8200
+                      - ELASTIC_APM_FLUSH_INTERVAL=5
+                      - ELASTIC_APM_TRANSACTION_MAX_SPANS=50
+                      - ELASTIC_APM_SAMPLE_RATE=1
+                      - ELASTICSEARCH_URL=http://elasticsearch:9200
+                      - OPBEANS_DT_PROBABILITY=0.50
+                    logging:
+                      driver: 'json-file'
+                      options:
+                          max-size: '2m'
+                          max-file: '5'
+                    depends_on:
+                      elasticsearch:
+                        condition: service_healthy
+                      apm-server:
+                        condition: service_healthy
+                    healthcheck:
+                        test: ["CMD", "curl", "--write-out", "'HTTP %{http_code}'", "--fail", "--silent", "--output", "/dev/null", "http://opbeans-dotnet:80/"]
+                        interval: 10s
+                        retries: 36""")
+        )
+
     def test_opbeans_go(self):
         opbeans_go = OpbeansGo(version="6.3.10").render()
         self.assertEqual(
@@ -747,9 +786,20 @@ class LocalTest(unittest.TestCase):
             setup()
         docker_compose_yml.seek(0)
         got = yaml.load(docker_compose_yml)
-        services = got["services"]
-        self.assertIn("redis", services)
-        self.assertIn("postgres", services)
+        services = set(got["services"])
+        self.assertSetEqual(services, {
+            "apm-server", "elasticsearch", "kibana",
+            "filebeat", "heartbeat", "metricbeat", "packetbeat",
+            "opbeans-dotnet",
+            "opbeans-go",
+            "opbeans-java",
+            "opbeans-load-generator",
+            "opbeans-node",
+            "opbeans-python",
+            "opbeans-ruby",
+            "opbeans-rum",
+            "postgres", "redis",
+        })
 
     @mock.patch(compose.__name__ + '.load_images')
     def test_start_one_opbeans(self, _ignore_load_images):
@@ -765,10 +815,10 @@ class LocalTest(unittest.TestCase):
         self.assertIn("postgres", services)
 
     @mock.patch(compose.__name__ + '.load_images')
-    def test_start_opbeans_no_apm_server(self, _ignore_load_images):
+    def test_start_all_opbeans_no_apm_server(self, _ignore_load_images):
         docker_compose_yml = stringIO()
         with mock.patch.dict(LocalSetup.SUPPORTED_VERSIONS, {'master': '7.0.10-alpha1'}):
-            setup = LocalSetup(argv=self.common_setup_args + ["master", "--all", "--no-apm-server"])
+            setup = LocalSetup(argv=self.common_setup_args + ["master", "--all-opbeans", "--no-apm-server"])
             setup.set_docker_compose_path(docker_compose_yml)
             setup()
         docker_compose_yml.seek(0)
@@ -816,14 +866,60 @@ class LocalTest(unittest.TestCase):
         )
         self.assertEqual("docker.elastic.co/kibana/kibana:{}-SNAPSHOT".format(version), services["kibana"]["image"])
 
+    @mock.patch(compose.__name__ + '.resolve_bc')
     @mock.patch(compose.__name__ + '.load_images')
-    def test_start_bc(self, mock_load_images):
+    def test_start_bc(self, mock_load_images, mock_resolve_bc):
+        mock_resolve_bc.return_value = {
+            "projects": {
+                "elasticsearch": {
+                    "packages": {
+                        "elasticsearch-6.9.5-docker-image.tar.gz": {
+                            "url": "https://staging.elastic.co/.../elasticsearch-6.9.5-docker-image.tar.gz",
+                            "type": "docker"
+                        },
+                    },
+                },
+                "kibana": {
+                    "packages": {
+                        "kibana-6.9.5-docker-image.tar.gz": {
+                            "url": "https://staging.elastic.co/.../kibana-6.9.5-docker-image.tar.gz",
+                            "type": "docker"
+                        },
+                    },
+                },
+                "apm-server": {
+                    "packages": {
+                        "apm-server-6.9.5-docker-image.tar.gz": {
+                            "url": "https://staging.elastic.co/.../apm-server-6.9.5-docker-image.tar.gz",
+                            "type": "docker"
+                        },
+                    },
+                },
+                "beats": {
+                    "packages": {
+                        "metricbeat-6.9.5-linux-amd64-docker-image.tar.gz": {
+                            "url": "https://staging.elastic.co/.../metricbeat-6.9.5-docker-image.tar.gz",
+                            "type": "docker",
+                        },
+                    }
+                },
+                "logstash-docker": {
+                    "packages": {
+                        "logstash-6.9.5-docker-image.tar.gz": {
+                            "url": "https://staging.elastic.co/.../logstash-6.9.5-docker-image.tar.gz",
+                            "type": "docker"
+                        },
+                    },
+                },
+            },
+        }
         docker_compose_yml = stringIO()
         image_cache_dir = "/foo"
         version = "6.9.5"
         bc = "abcd1234"
         self.assertNotIn(version, LocalSetup.SUPPORTED_VERSIONS)
-        setup = LocalSetup(argv=self.common_setup_args + [version, "--bc" , bc, "--image-cache-dir", image_cache_dir])
+        setup = LocalSetup(argv=self.common_setup_args + [
+            version, "--bc", bc, "--image-cache-dir", image_cache_dir, "--with-logstash", "--with-metricbeat"])
         setup.set_docker_compose_path(docker_compose_yml)
         setup()
         docker_compose_yml.seek(0)
@@ -836,14 +932,101 @@ class LocalTest(unittest.TestCase):
         self.assertEqual("docker.elastic.co/kibana/kibana:{}".format(version), services["kibana"]["image"])
         mock_load_images.assert_called_once_with(
             {
-                'https://staging.elastic.co/6.9.5-abcd1234/downloads/apm-server/apm-server-6.9.5-docker-image.tar.gz',
-                'https://staging.elastic.co/6.9.5-abcd1234/downloads/elasticsearch/elasticsearch-6.9.5-docker-image.tar.gz',
-                'https://staging.elastic.co/6.9.5-abcd1234/downloads/kibana/kibana-6.9.5-docker-image.tar.gz'
+                "https://staging.elastic.co/.../elasticsearch-6.9.5-docker-image.tar.gz",
+                "https://staging.elastic.co/.../logstash-6.9.5-docker-image.tar.gz",
+                "https://staging.elastic.co/.../kibana-6.9.5-docker-image.tar.gz",
+                "https://staging.elastic.co/.../apm-server-6.9.5-docker-image.tar.gz",
+                "https://staging.elastic.co/.../metricbeat-6.9.5-docker-image.tar.gz",
             },
-            image_cache_dir)\
+            image_cache_dir)
 
+    @mock.patch(compose.__name__ + '.resolve_bc')
     @mock.patch(compose.__name__ + '.load_images')
-    def test_start_bc_with_release(self, mock_load_images):
+    def test_start_bc_oss(self, mock_load_images, mock_resolve_bc):
+        mock_resolve_bc.return_value = {
+            "projects": {
+                "elasticsearch": {
+                    "packages": {
+                        "elasticsearch-oss-6.9.5-docker-image.tar.gz": {
+                            "url": "https://staging.elastic.co/.../elasticsearch-oss-6.9.5-docker-image.tar.gz",
+                            "type": "docker"
+                        },
+                    },
+                },
+                "kibana": {
+                    "packages": {
+                        "kibana-oss-6.9.5-docker-image.tar.gz": {
+                            "url": "https://staging.elastic.co/.../kibana-oss-6.9.5-docker-image.tar.gz",
+                            "type": "docker"
+                        },
+                    },
+                },
+                "apm-server": {
+                    "packages": {
+                        "apm-server-oss-6.9.5-docker-image.tar.gz": {
+                            "url": "https://staging.elastic.co/.../apm-server-oss-6.9.5-docker-image.tar.gz",
+                            "type": "docker"
+                        },
+                    },
+                },
+            },
+        }
+        docker_compose_yml = stringIO()
+        image_cache_dir = "/foo"
+        version = "6.9.5"
+        bc = "abcd1234"
+        self.assertNotIn(version, LocalSetup.SUPPORTED_VERSIONS)
+        setup = LocalSetup(argv=self.common_setup_args + [
+            version, "--oss",  "--bc", bc, "--image-cache-dir", image_cache_dir])
+        setup.set_docker_compose_path(docker_compose_yml)
+        setup()
+        docker_compose_yml.seek(0)
+        got = yaml.load(docker_compose_yml)
+        services = got["services"]
+        self.assertEqual(
+            "docker.elastic.co/elasticsearch/elasticsearch-oss:{}".format(version),
+            services["elasticsearch"]["image"]
+        )
+        self.assertEqual("docker.elastic.co/kibana/kibana-oss:{}".format(version), services["kibana"]["image"])
+        mock_load_images.assert_called_once_with(
+            {
+                "https://staging.elastic.co/.../elasticsearch-oss-6.9.5-docker-image.tar.gz",
+                "https://staging.elastic.co/.../kibana-oss-6.9.5-docker-image.tar.gz",
+                "https://staging.elastic.co/.../apm-server-oss-6.9.5-docker-image.tar.gz",
+            },
+            image_cache_dir)
+
+    @mock.patch(compose.__name__ + '.resolve_bc')
+    @mock.patch(compose.__name__ + '.load_images')
+    def test_start_bc_with_release(self, mock_load_images, mock_resolve_bc):
+        mock_resolve_bc.return_value = {
+            "projects": {
+                "elasticsearch": {
+                    "packages": {
+                        "elasticsearch-6.9.5-docker-image.tar.gz": {
+                            "url": "https://staging.elastic.co/.../elasticsearch-6.9.5-docker-image.tar.gz",
+                            "type": "docker"
+                        },
+                    },
+                },
+                "kibana": {
+                    "packages": {
+                        "kibana-6.9.5-docker-image.tar.gz": {
+                            "url": "https://staging.elastic.co/.../kibana-6.9.5-docker-image.tar.gz",
+                            "type": "docker"
+                        },
+                    },
+                },
+                "apm-server": {
+                    "packages": {
+                        "apm-server-6.9.5-docker-image.tar.gz": {
+                            "url": "https://staging.elastic.co/.../apm-server-6.9.5-docker-image.tar.gz",
+                            "type": "docker"
+                        },
+                    },
+                },
+            },
+        }
         docker_compose_yml = stringIO()
         image_cache_dir = "/foo"
         version = "6.9.5"
@@ -851,8 +1034,8 @@ class LocalTest(unittest.TestCase):
         bc = "abcd1234"
         self.assertNotIn(version, LocalSetup.SUPPORTED_VERSIONS)
         setup = LocalSetup(
-            argv=self.common_setup_args + [version, "--bc" , bc, "--image-cache-dir", image_cache_dir,
-                  "--apm-server-version", apm_server_version, "--apm-server-release"])
+            argv=self.common_setup_args + [version, "--bc", bc, "--image-cache-dir", image_cache_dir,
+                                           "--apm-server-version", apm_server_version, "--apm-server-release"])
         setup.set_docker_compose_path(docker_compose_yml)
         setup()
         docker_compose_yml.seek(0)
@@ -864,38 +1047,41 @@ class LocalTest(unittest.TestCase):
         )
         mock_load_images.assert_called_once_with(
             {
-                'https://staging.elastic.co/6.9.5-abcd1234/downloads/elasticsearch/elasticsearch-6.9.5-docker-image.tar.gz',
-                'https://staging.elastic.co/6.9.5-abcd1234/downloads/kibana/kibana-6.9.5-docker-image.tar.gz'
+                "https://staging.elastic.co/.../elasticsearch-6.9.5-docker-image.tar.gz",
+                "https://staging.elastic.co/.../kibana-6.9.5-docker-image.tar.gz",
             },
             image_cache_dir)
 
-    def test_docker_download_image_url(self):
+    @mock.patch(compose.__name__ + '.resolve_bc')
+    def test_docker_download_image_url(self, mock_resolve_bc):
+        mock_resolve_bc.return_value = {
+            "projects": {
+                "elasticsearch": {
+                    "commit_hash": "abc1234",
+                    "commit_url": "https://github.com/elastic/elasticsearch/commits/abc1234",
+                    "packages": {
+                        "elasticsearch-6.3.10-docker-image.tar.gz": {
+                            "url": "https://staging.elastic.co/.../elasticsearch-6.3.10-docker-image.tar.gz",
+                            "type": "docker"
+                        },
+                        "elasticsearch-oss-6.3.10-docker-image.tar.gz": {
+                            "url": "https://staging.elastic.co/.../elasticsearch-oss-6.3.10-docker-image.tar.gz",
+                            "type": "docker"
+                        }
+                    }
+                }
+            }
+        }
         Case = collections.namedtuple("Case", ("service", "expected", "args"))
         common_args = (("image_cache_dir", ".images"),)
         cases = [
             # post-6.3
-            Case(Elasticsearch, "https://staging.elastic.co/6.3.10-be84d930/downloads/elasticsearch/elasticsearch-6.3.10-docker-image.tar.gz",
+            Case(Elasticsearch,
+                 "https://staging.elastic.co/.../elasticsearch-6.3.10-docker-image.tar.gz",
                  dict(bc="be84d930", version="6.3.10")),
-            Case(Elasticsearch, "https://staging.elastic.co/6.3.10-be84d930/downloads/elasticsearch/elasticsearch-oss-6.3.10-docker-image.tar.gz",
+            Case(Elasticsearch,
+                 "https://staging.elastic.co/.../elasticsearch-oss-6.3.10-docker-image.tar.gz",
                  dict(bc="be84d930", oss=True, version="6.3.10")),
-        ]
-        for case in cases:
-            args = dict(common_args)
-            if case.args:
-                args.update(case.args)
-            service = case.service(**args)
-            got = service.image_download_url()
-            self.assertEqual(case.expected, got)
-
-    def test_docker_download_old_image_url(self):
-        Case = collections.namedtuple("Case", ("service", "expected", "args"))
-        common_args = (("image_cache_dir", ".images"),)
-        cases = [
-            # post-6.3
-            Case(Elasticsearch, "https://staging.elastic.co/6.3.10-be84d930/docker/elasticsearch-6.3.10.tar.gz",
-                 dict(bc="be84d930", version="6.3.10", bc_old=True)),
-            Case(Elasticsearch, "https://staging.elastic.co/6.3.10-be84d930/docker/elasticsearch-oss-6.3.10.tar.gz",
-                 dict(bc="be84d930", oss=True, version="6.3.10", bc_old=True)),
         ]
         for case in cases:
             args = dict(common_args)

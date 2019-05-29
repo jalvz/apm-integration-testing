@@ -62,6 +62,9 @@ test-kibana: venv
 test-server: venv
 	pytest tests/server/ -v -s $(JUNIT_OPT)/server-junit.xml
 
+test-upgrade: venv
+	pytest tests/server/test_upgrade.py -v -s $(JUNIT_OPT)/server-junit.xml
+
 SUBCOMMANDS = list-options load-dashboards start status stop upload-sourcemap versions
 
 test-helps:
@@ -70,15 +73,18 @@ test-helps:
 test-all: venv test-compose lint test-helps
 	pytest -v -s $(JUNIT_OPT)/all-junit.xml
 
+docker-compose-wait: venv
+	docker-compose-wait || (docker ps -a && exit 1)
+
 docker-test-%:
 	TARGET=test-$* $(MAKE) dockerized-test
 
 dockerized-test:
 	@echo waiting for services to be healthy
-	docker-compose-wait || (./scripts/docker-summary.sh; echo "[ERROR] Failed waiting for all containers are healthy"; exit 1)
+	$(MAKE) docker-compose-wait || (./scripts/docker-summary.sh; echo "[ERROR] Failed waiting for all containers are healthy"; exit 1)
 
 	./scripts/docker-summary.sh
-	
+
 	@echo running make $(TARGET) inside a container
 	docker build --pull -t apm-integration-testing .
 
@@ -92,6 +98,7 @@ dockerized-test:
 	  -e ES_URL=http://elasticsearch:9200 \
 	  -e KIBANA_URL=http://kibana:5601 \
 	  -e DJANGO_URL="http://djangoapp:8003" \
+	  -e DOTNET_URL="http://dotnetapp:8100" \
 	  -e EXPRESS_URL="http://expressapp:8010" \
 	  -e FLASK_URL="http://flaskapp:8001" \
 	  -e GO_NETHTTP_URL="http://gonethttpapp:8080" \
@@ -105,4 +112,4 @@ dockerized-test:
 	  apm-integration-testing \
 	  $(TARGET)
 
-.PHONY: test-% docker-test-% dockerized-test
+.PHONY: test-% docker-test-% dockerized-test docker-compose-wait

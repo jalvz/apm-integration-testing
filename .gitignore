@@ -2,7 +2,9 @@
 **/*.pyc
 .cache
 **/__pycache__
-/.idea
+**/.idea
+**/target
+*.iml
 **/tmp
 **/log
 **/.images
@@ -16,3 +18,5 @@ docker/opbeans/node/sourcemaps/*.map
 .DS_Store
 node_modules
 **/.vscode/settings.json
+**/obj
+**/bin

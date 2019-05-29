@@ -1,14 +1,14 @@
 from __future__ import print_function
 
 import unittest
+import json
 import yaml
 
-
-from ..compose import (AgentGoNetHttp, AgentJavaSpring, AgentNodejsExpress,
+from ..compose import (AgentDotnet, AgentGoNetHttp, AgentJavaSpring, AgentNodejsExpress,
                        AgentPythonDjango, AgentPythonFlask, AgentRubyRails)
 
 from ..compose import (ApmServer, Kibana, Elasticsearch, Filebeat, Metricbeat,
-                       Logstash, Kafka)
+                       Packetbeat, Logstash, Kafka)
 
 from ..compose import Zookeeper
 
@@ -29,7 +29,7 @@ class AgentServiceTest(ServiceTest):
                         dockerfile: Dockerfile
                         context: docker/go/nethttp
                     container_name: gonethttpapp
-                    depends_on: 
+                    depends_on:
                         apm-server:
                             condition: 'service_healthy'
                     environment:
@@ -59,7 +59,7 @@ class AgentServiceTest(ServiceTest):
                         dockerfile: Dockerfile
                         context: docker/nodejs/express
                     container_name: expressapp
-                    depends_on: 
+                    depends_on:
                         apm-server:
                             condition: 'service_healthy'
                     command: bash -c "npm install elastic-apm-node && node app.js"
@@ -93,7 +93,7 @@ class AgentServiceTest(ServiceTest):
                         context: docker/python/django
                     command: bash -c "pip install -q -U elastic-apm && python testapp/manage.py runserver 0.0.0.0:8003"
                     container_name: djangoapp
-                    depends_on: 
+                    depends_on:
                         apm-server:
                             condition: 'service_healthy'
                     environment:
@@ -122,7 +122,7 @@ class AgentServiceTest(ServiceTest):
                         context: docker/python/flask
                     command: bash -c "pip install -q -U elastic-apm && gunicorn app:app"
                     container_name: flaskapp
-                    depends_on: 
+                    depends_on:
                         apm-server:
                             condition: 'service_healthy'
                     environment:
@@ -150,7 +150,7 @@ class AgentServiceTest(ServiceTest):
                         dockerfile: Dockerfile
                         context: docker/ruby/rails
                     container_name: railsapp
-                    depends_on: 
+                    depends_on:
                         apm-server:
                             condition: 'service_healthy'
                     command: bash -c "bundle install && RAILS_ENV=production bundle exec rails s -b 0.0.0.0 -p 8020"
@@ -184,10 +184,11 @@ class AgentServiceTest(ServiceTest):
                     build:
                         args:
                             JAVA_AGENT_BRANCH: master
+                            JAVA_AGENT_BUILT_VERSION: ""
                         dockerfile: Dockerfile
                         context: docker/java/spring
                     container_name: javaspring
-                    depends_on: 
+                    depends_on:
                         apm-server:
                             condition: 'service_healthy'
                     environment:
@@ -207,14 +208,43 @@ class AgentServiceTest(ServiceTest):
         agent = AgentJavaSpring(apm_server_url="http://foo").render()["agent-java-spring"]
         self.assertEqual("http://foo", agent["environment"]["ELASTIC_APM_SERVER_URL"])
 
-
-class ApmServerServiceTest(ServiceTest):
-    def test_default_buildcandidate(self):
-        apm_server = ApmServer(version="6.3.100", bc=True).render()["apm-server"]
-        self.assertEqual(
-            apm_server["image"], "docker.elastic.co/apm/apm-server:6.3.100"
+    def test_agent_dotnet(self):
+        agent = AgentDotnet().render()
+        self.assertDictEqual(
+            agent, yaml.load("""
+                agent-dotnet:
+                    build:
+                        args:
+                            DOTNET_AGENT_BRANCH: master
+                            DOTNET_AGENT_VERSION: ""
+                        dockerfile: Dockerfile
+                        context: docker/dotnet
+                    container_name: dotnetapp
+                    depends_on:
+                        apm-server:
+                            condition: 'service_healthy'
+                    environment:
+                        ELASTIC_APM_API_REQUEST_TIME: '3s'
+                        ELASTIC_APM_FLUSH_INTERVAL: '5'
+                        ELASTIC_APM_SAMPLE_RATE: '1'
+                        ELASTIC_APM_SERVICE_NAME: dotnetapp
+                        ELASTIC_APM_TRANSACTION_IGNORE_NAMES: 'healthcheck'
+                    healthcheck:
+                        interval: 10s
+                        retries: 12
+                        test: ["CMD", "curl", "--write-out", "'HTTP %{http_code}'", "--fail", "--silent", "--output",
+                        "/dev/null", "http://dotnetapp:8100/healthcheck"]
+                    ports:
+                        - 127.0.0.1:8100:8100
+            """)
         )
 
+        # test overrides
+        agent = AgentDotnet(apm_server_url="http://foo").render()["agent-dotnet"]
+        self.assertEqual("http://foo", agent["environment"]["ELASTIC_APM_SERVER_URLS"])
+
+
+class ApmServerServiceTest(ServiceTest):
     def test_default_snapshot(self):
         apm_server = ApmServer(version="6.3.100", snapshot=True).render()["apm-server"]
         self.assertEqual(
@@ -225,12 +255,6 @@ class ApmServerServiceTest(ServiceTest):
         apm_server = ApmServer(version="6.3.100", release=True).render()["apm-server"]
         self.assertEqual(
             apm_server["image"], "docker.elastic.co/apm/apm-server:6.3.100"
-        )
-
-    def test_oss_buildcandidate(self):
-        apm_server = ApmServer(version="6.3.100", oss=True, bc="123").render()["apm-server"]
-        self.assertEqual(
-            apm_server["image"], "docker.elastic.co/apm/apm-server-oss:6.3.100"
         )
 
     def test_oss_snapshot(self):
@@ -321,6 +345,17 @@ class ApmServerServiceTest(ServiceTest):
         for o in kafka_options:
             self.assertTrue(o in apm_server["command"], "{} not set while output=kafka".format(o))
 
+    def test_opt(self):
+        apm_server = ApmServer(version="7.1.10", apm_server_opt=("an.opt=foo", "opt2=bar")).render()["apm-server"]
+        self.assertTrue(
+            any(e.startswith("an.opt") for e in apm_server["command"]),
+            "some.option should be set "
+        )
+        self.assertTrue(
+            any(e.startswith("opt2") for e in apm_server["command"]),
+            "some.option should be set "
+        )
+
     def test_pipeline(self):
         apm_server = ApmServer(version="6.5.10").render()["apm-server"]
         self.assertTrue(
@@ -346,6 +381,34 @@ class ApmServerServiceTest(ServiceTest):
             "output.elasticsearch.pipelines set while apm_server_enable_pipeline=False in version < 6.5"
         )
 
+    def test_queue_file(self):
+        cases = [
+            (
+                dict(),
+                {"file": {"path": "$${path.data}/spool.dat"}},
+            ),
+            (
+                dict(apm_server_queue_file_size="200MiB"),
+                {"file": {"path": "$${path.data}/spool.dat", "size": "200MiB"}},
+            ),
+            (
+                dict(apm_server_queue_write_flush_timeout="0s"),
+                {"file": {"path": "$${path.data}/spool.dat"}, "write":{"flush.timeout": "0s"}},
+            ),
+        ]
+        for opts, want in cases:
+            apm_server = ApmServer(version="7.1.10", apm_server_queue="file", **opts).render()["apm-server"]
+            got = [e.split("=", 1)[1] for e in apm_server["command"] if e.startswith("queue.spool=")]
+            self.assertEqual(1, len(got))
+            self.assertEqual(json.loads(got[0]), want)
+
+    def test_queue_mem(self):
+        apm_server = ApmServer(version="7.1.10", apm_server_queue="mem").render()["apm-server"]
+        self.assertFalse(
+            any(e.startswith("queue.") for e in apm_server["command"]),
+            "no queue settings with memory queue (for now)"
+        )
+
     def test_apm_server_build_branch(self):
         apm_server = ApmServer(version="6.3.100", apm_server_build="foo.git@bar", release=True).render()["apm-server"]
         self.assertIsNone(apm_server.get("image"))
@@ -368,7 +431,16 @@ class ApmServerServiceTest(ServiceTest):
         render = ApmServer(version="6.4.100", apm_server_count=2).render()
         apm_server_lb = render["apm-server"]
         apm_server_2 = render["apm-server-2"]
+        self.assertDictEqual(apm_server_lb["build"], {"context": "docker/apm-server/haproxy"})
+        self.assertListEqual(["127.0.0.1:8200:8200"], apm_server_lb["ports"], apm_server_lb["ports"])
+        self.assertListEqual(["8200", "6060"], apm_server_2["ports"], apm_server_2["ports"])
+
+    def test_apm_server_tee(self):
+        render = ApmServer(version="6.4.100", apm_server_count=2, apm_server_tee=True).render()
+        apm_server_lb = render["apm-server"]
+        apm_server_2 = render["apm-server-2"]
         self.assertIn("build", apm_server_lb)
+        self.assertDictEqual(apm_server_lb["build"], {"context": "docker/apm-server/teeproxy"})
         self.assertListEqual(["127.0.0.1:8200:8200"], apm_server_lb["ports"], apm_server_lb["ports"])
         self.assertListEqual(["8200", "6060"], apm_server_2["ports"], apm_server_2["ports"])
 
@@ -472,7 +544,8 @@ class FilebeatServiceTest(ServiceTest):
                     image: docker.elastic.co/beats/filebeat:6.0.4
                     container_name: localtesting_6.0.4_filebeat
                     user: root
-                    command: filebeat -e --strict.perms=false -E setup.dashboards.enabled=true
+                    command: ["filebeat", "-e", "--strict.perms=false", "-E", "setup.dashboards.enabled=true", "-E", 'output.elasticsearch.hosts=["elasticsearch:9200"]', "-E", "output.elasticsearch.enabled=true"]
+                    environment: {}
                     logging:
                         driver: 'json-file'
                         options:
@@ -497,7 +570,8 @@ class FilebeatServiceTest(ServiceTest):
                     image: docker.elastic.co/beats/filebeat:6.1.1
                     container_name: localtesting_6.1.1_filebeat
                     user: root
-                    command: filebeat -e --strict.perms=false -E setup.dashboards.enabled=true
+                    command: ["filebeat", "-e", "--strict.perms=false", "-E", "setup.dashboards.enabled=true", "-E", 'output.elasticsearch.hosts=["elasticsearch:9200"]', "-E", "output.elasticsearch.enabled=true"]
+                    environment: {}
                     logging:
                         driver: 'json-file'
                         options:
@@ -513,6 +587,17 @@ class FilebeatServiceTest(ServiceTest):
                         - /var/lib/docker/containers:/var/lib/docker/containers
                         - /var/run/docker.sock:/var/run/docker.sock""")
         )
+
+    def test_logstash_output(self):
+        beat = Filebeat(version="6.3.100", filebeat_output="logstash").render()["filebeat"]
+        options = [
+            "output.elasticsearch.enabled=false",
+            "output.logstash.enabled=true",
+            "output.logstash.hosts=[\"logstash:5044\"]",
+            "xpack.monitoring.elasticsearch.hosts=[\"elasticsearch:9200\"]",
+        ]
+        for o in options:
+            self.assertTrue(o in beat["command"], "{} not set in {} while output=logstash".format(o, beat["command"]))
 
 
 class KafkaServiceTest(ServiceTest):
@@ -640,7 +725,8 @@ class MetricbeatServiceTest(ServiceTest):
                     image: docker.elastic.co/beats/metricbeat:6.2.4
                     container_name: localtesting_6.2.4_metricbeat
                     user: root
-                    command: metricbeat -e --strict.perms=false -E setup.dashboards.enabled=true
+                    command: ["metricbeat", "-e", "--strict.perms=false", "-E", "setup.dashboards.enabled=true", "-E", 'output.elasticsearch.hosts=["elasticsearch:9200"]', "-E", "output.elasticsearch.enabled=true"]
+                    environment: {}
                     logging:
                         driver: 'json-file'
                         options:
@@ -654,6 +740,47 @@ class MetricbeatServiceTest(ServiceTest):
                     volumes:
                         - ./docker/metricbeat/metricbeat.yml:/usr/share/metricbeat/metricbeat.yml
                         - /var/run/docker.sock:/var/run/docker.sock""")
+        )
+
+    def test_logstash_output(self):
+        beat = Metricbeat(version="6.3.100", metricbeat_output="logstash").render()["metricbeat"]
+        options = [
+            "output.elasticsearch.enabled=false",
+            "output.logstash.enabled=true",
+            "output.logstash.hosts=[\"logstash:5044\"]",
+            "xpack.monitoring.elasticsearch.hosts=[\"elasticsearch:9200\"]",
+        ]
+        for o in options:
+            self.assertTrue(o in beat["command"], "{} not set in {} while output=logstash".format(o, beat["command"]))
+
+
+class PacketbeatServiceTest(ServiceTest):
+    def test_packetbeat(self):
+        packetbeat = Packetbeat(version="6.2.4", release=True).render()
+        self.assertEqual(
+            packetbeat, yaml.load("""
+                packetbeat:
+                    image: docker.elastic.co/beats/packetbeat:6.2.4
+                    container_name: localtesting_6.2.4_packetbeat
+                    user: root
+                    command: ["packetbeat", "-e", "--strict.perms=false", "-E", "packetbeat.interfaces.device=eth0", "-E", "setup.dashboards.enabled=true", "-E", 'output.elasticsearch.hosts=["elasticsearch:9200"]', "-E", "output.elasticsearch.enabled=true"]
+                    environment: {}
+                    logging:
+                        driver: 'json-file'
+                        options:
+                            max-size: '2m'
+                            max-file: '5'
+                    depends_on:
+                        elasticsearch:
+                            condition: service_healthy
+                        kibana:
+                            condition: service_healthy
+                    volumes:
+                        - ./docker/packetbeat/packetbeat.yml:/usr/share/packetbeat/packetbeat.yml
+                        - /var/run/docker.sock:/var/run/docker.sock
+                    network_mode: 'service:apm-server'
+                    privileged: 'true'
+                    cap_add: ['NET_ADMIN', 'NET_RAW']""") # noqa: 501
         )
 
 

@@ -1,4 +1,4 @@
-# APM Integration Testing 
+# APM Integration Testing
 
 This repo contains tools for end to end (eg agent -> apm server -> elasticsearch <- kibana) development and testing of Elastic APM.
 
@@ -151,9 +151,24 @@ Tests should always eventually be run within a docker container to ensure a cons
 
 Prefix any of the `test-` targets with `docker-` to run them in a container eg: `make docker-test-server`.
 
+### Network issues diagnose
+
+It is possible to diagnose Network issues related with lost documents
+between APM Agent, APM server, or Elasticsearch,
+in order to do that, you have to add the `--with-packetbeat` argument
+to your command line.
+When you add this argument an additional Docker container running Packetbeat is
+attached to the APM Server Docker container,
+this container will grab information about the communication between APM Agent,
+APM server, and Elasticsearch that you can analyze in case of failure.
+When a test fails, data related to Packetbeat and APM is dumped
+with [elasticdump](https://www.npmjs.com/package/elasticdump) into a couple
+of files `/app/tests/results/data-NAME_OF_THE_TEST.json`
+and `/app/tests/results/packetbeat-NAME_OF_THE_TEST.json`
+
 ### Continuous Integration
 
-Jenkins runs the scripts from `scripts/ci/` and is viewable at https://apm-ci.elastic.co/.
+Jenkins runs the scripts from `.ci/scripts` and is viewable at https://apm-ci.elastic.co/.
 
 Those scripts shut down any existing testing containers and start a fresh new environment before running tests unless the `REUSE_CONTAINERS` environment variable is set.
 
@@ -161,6 +176,7 @@ These are the scripts available to execute:
 
 * `all.sh:` runs all test on apm-server and every agent type.
 * `common.sh:` common scripts variables and functions, it does not execute anything.
+* `dotnet.sh:` runs .NET tests, you can choose the versions to run see the [environment variables](#environment-variables) configuration.
 * `go.sh:` runs Go tests, you can choose the versions to run see the [environment variables](#environment-variables) configuration.
 * `java.sh:` runs Java tests, you can choose the versions to run see the [environment variables](#environment-variables) configuration.
 * `kibana.sh:` runs kibana agent tests, you can choose the versions to run see the [environment variables](#environment-variables) configuration.
@@ -178,6 +194,7 @@ It is possible to configure some options and versions to run by defining environ
 * `BUILD_OPTS`: aggregates arguments to default arguments passing to compose.py see the compose.py help to know which ones you can use.
 * `ELASTIC_STACK_VERSION`: selects the Elastic Stack version to use on tests, by default is is used the master branch. You can choose any branch or tag from the Github repo.
 * `APM_SERVER_BRANCH`: selects the APM Server version to use on tests, by default it uses the master branch. You can choose any branch or tag from the Github repo.
+* `APM_AGENT_DOTNET_VERSION`: selects the agent .NET version to use, by default it uses the master branch. See [specify an agent version](#specify-an-agent-version)
 * `APM_AGENT_GO_VERSION`: selects the agent Go version to use, by default it uses the master branch. See [specify an agent version](#specify-an-agent-version)
 * `APM_AGENT_JAVA_VERSION`: selects the agent Java version to use, by default it uses the master branch. See [specify an agent version](#specify-an-agent-version)
 * `APM_AGENT_NODEJS_VERSION`: selects the agent Nodejs version to use, by default it uses the master branch. See [specify an agent version](#specify-an-agent-version)
