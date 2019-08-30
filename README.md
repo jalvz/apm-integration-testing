@@ -2,13 +2,14 @@
 
 This repo contains tools for end to end (eg agent -> apm server -> elasticsearch <- kibana) development and testing of Elastic APM.
 
-[![Build Status](https://apm-ci.elastic.co/job/apm-integration-tests-mbp/job/master/badge/icon)](https://apm-ci.elastic.co/blue/organizations/jenkins/apm-integration-tests-mbp/branches)
+[![Build Status](https://apm-ci.elastic.co/buildStatus/icon?job=apm-integration-tests%2Fmaster)](https://apm-ci.elastic.co/job/apm-integration-tests/job/master/)
 
 ## Prerequisites
 
 The basic requirements for starting a local environment are:
 
 - Docker
+- Docker compose
 - Python (version 3 preferred)
 
 This repo is tested with Python 3 but best effort is made to make starting/stopping environments work with Python 2.7.
@@ -16,6 +17,9 @@ This repo is tested with Python 3 but best effort is made to make starting/stopp
 ### Docker
 
 [Installation instructions](https://www.docker.com/community-edition)
+
+### Docker compose
+[Installation instructions](https://docs.docker.com/compose/install/)
 
 ### Python 3
 
@@ -80,6 +84,17 @@ To disable load generation for a specific service, use the `--no-opbeans-XYZ-loa
 
 Opbeans RUM does not need a load generation service,
 as it is itself generating load using a headless chrome instance.
+
+#### Start Opbeans with a specific agent branch
+
+You can start Opbeans with an agent which is built from source from a specific branch or PR.
+This is currently only supported with the go and the Java agent.
+
+Example which builds the https://github.com/elastic/apm-agent-java/pull/588 branch from source and uses an APM server built from master:
+
+    ./scripts/compose.py start master --with-opbeans-java --opbeans-java-agent-branch=pr/588/head --apm-server-build https://github.com/elastic/apm-server.git@master
+
+Note that it may take a while to build the agent from source.
 
 ### Uploading Sourcemaps
 
@@ -181,9 +196,11 @@ These are the scripts available to execute:
 * `java.sh:` runs Java tests, you can choose the versions to run see the [environment variables](#environment-variables) configuration.
 * `kibana.sh:` runs kibana agent tests, you can choose the versions to run see the [environment variables](#environment-variables) configuration.
 * `nodejs.sh:` runs Nodejs agent tests, you can choose the versions to run see the [environment variables](#environment-variables) configuration.
+* `opbeans.sh:` runs the unit tests for the apm-integration-testing app and validate the linting, you can choose the versions to run see the [environment variables](#environment-variables) configuration.
 * `python.sh:` runs Python agent tests, you can choose the versions to run see the [environment variables](environment-variables) configuration.
 * `ruby.sh:` runs Ruby agent tests, you can choose the versions to run see the [environment variables](#environment-variables) configuration.
 * `server.sh:` runs APM Server tests, you can choose the versions to run see the [environment variables](#environment-variables) configuration.
+* `unit-tests.sh:` runs the unit tests for the apm-integration-testing app and validate the linting, you can choose the versions to run see the [environment variables](#environment-variables) configuration.
 
 #### Environment Variables
 
@@ -246,3 +263,19 @@ make test-agent-python
 Testing unrelease code for other agents follows a simliar pattern.
 
 See `version*` in https://github.com/elastic/apm-integration-testing/tree/master/scripts/ci for details on how CI tests specific agent/elastic stack version combinations.
+
+### Testing docker images
+
+Tests are written using [bats](https://github.com/sstephenson/bats) under the docker/tests dir
+
+    make -C docker test-<app>
+    make -C docker test-opbeans-<agent>
+    make -C docker test-<agent>
+
+Test all the docker images for the Opbeans
+
+    make -C docker all-opbeans-tests
+
+Test all the docker images for the agents
+
+    make -C docker all-agents-tests

@@ -26,6 +26,7 @@ class AgentServiceTest(ServiceTest):
                     build:
                         args:
                             GO_AGENT_BRANCH: master
+                            GO_AGENT_REPO: elastic/apm-agent-go
                         dockerfile: Dockerfile
                         context: docker/go/nethttp
                     container_name: gonethttpapp
@@ -49,6 +50,14 @@ class AgentServiceTest(ServiceTest):
         # test overrides
         agent = AgentGoNetHttp(apm_server_url="http://foo").render()["agent-go-net-http"]
         self.assertEqual("http://foo", agent["environment"]["ELASTIC_APM_SERVER_URL"], agent)
+
+    def test_agent_go_with_repo(self):
+        agent = AgentGoNetHttp(go_agent_repo="foo/myrepo.git").render()["agent-go-net-http"]
+        self.assertEqual("foo/myrepo.git", agent["build"]["args"]["GO_AGENT_REPO"])
+
+    def test_agent_go_with_version(self):
+        agent = AgentGoNetHttp(go_agent_version="bar").render()["agent-go-net-http"]
+        self.assertEqual("bar", agent["build"]["args"]["GO_AGENT_BRANCH"])
 
     def test_agent_nodejs_express(self):
         agent = AgentNodejsExpress().render()
@@ -147,6 +156,9 @@ class AgentServiceTest(ServiceTest):
             agent, yaml.load("""
                 agent-ruby-rails:
                     build:
+                        args:
+                            RUBY_AGENT_VERSION: latest
+                            RUBY_AGENT_REPO: elastic/apm-agent-ruby
                         dockerfile: Dockerfile
                         context: docker/ruby/rails
                     container_name: railsapp
@@ -163,6 +175,7 @@ class AgentServiceTest(ServiceTest):
                         RAILS_PORT: 8020
                         RUBY_AGENT_VERSION: latest
                         RUBY_AGENT_VERSION_STATE: release
+                        RUBY_AGENT_REPO: elastic/apm-agent-ruby
                     healthcheck:
                         interval: 10s
                         retries: 60
@@ -176,6 +189,18 @@ class AgentServiceTest(ServiceTest):
         agent = AgentRubyRails(apm_server_url="http://foo").render()["agent-ruby-rails"]
         self.assertEqual("http://foo", agent["environment"]["ELASTIC_APM_SERVER_URL"], agent)
 
+    def test_agent_ruby_with_repo(self):
+        agent = AgentRubyRails(ruby_agent_repo="foo/myrepo.git").render()["agent-ruby-rails"]
+        self.assertEqual("foo/myrepo.git", agent["environment"]["RUBY_AGENT_REPO"])
+
+    def test_agent_ruby_with_stage(self):
+        agent = AgentRubyRails(ruby_agent_version_state="github").render()["agent-ruby-rails"]
+        self.assertEqual("github", agent["environment"]["RUBY_AGENT_VERSION_STATE"])
+
+    def test_agent_ruby_with_version(self):
+        agent = AgentRubyRails(ruby_agent_version="1.0").render()["agent-ruby-rails"]
+        self.assertEqual("1.0", agent["environment"]["RUBY_AGENT_VERSION"])
+
     def test_agent_java_spring(self):
         agent = AgentJavaSpring().render()
         self.assertDictEqual(
@@ -185,6 +210,7 @@ class AgentServiceTest(ServiceTest):
                         args:
                             JAVA_AGENT_BRANCH: master
                             JAVA_AGENT_BUILT_VERSION: ""
+                            JAVA_AGENT_REPO: elastic/apm-agent-java
                         dockerfile: Dockerfile
                         context: docker/java/spring
                     container_name: javaspring
@@ -208,6 +234,18 @@ class AgentServiceTest(ServiceTest):
         agent = AgentJavaSpring(apm_server_url="http://foo").render()["agent-java-spring"]
         self.assertEqual("http://foo", agent["environment"]["ELASTIC_APM_SERVER_URL"])
 
+    def test_agent_java_with_repo(self):
+        agent = AgentJavaSpring(java_agent_repo="foo/myrepo.git").render()["agent-java-spring"]
+        self.assertEqual("foo/myrepo.git", agent["build"]["args"]["JAVA_AGENT_REPO"])
+
+    def test_agent_java_with_branch(self):
+        agent = AgentJavaSpring(java_agent_version="bar").render()["agent-java-spring"]
+        self.assertEqual("bar", agent["build"]["args"]["JAVA_AGENT_BRANCH"])
+
+    def test_agent_java_with_release(self):
+        agent = AgentJavaSpring(java_agent_release="1.0").render()["agent-java-spring"]
+        self.assertEqual("1.0", agent["build"]["args"]["JAVA_AGENT_BUILT_VERSION"])
+
     def test_agent_dotnet(self):
         agent = AgentDotnet().render()
         self.assertDictEqual(
@@ -217,6 +255,7 @@ class AgentServiceTest(ServiceTest):
                         args:
                             DOTNET_AGENT_BRANCH: master
                             DOTNET_AGENT_VERSION: ""
+                            DOTNET_AGENT_REPO: elastic/apm-agent-dotnet
                         dockerfile: Dockerfile
                         context: docker/dotnet
                     container_name: dotnetapp
@@ -243,6 +282,17 @@ class AgentServiceTest(ServiceTest):
         agent = AgentDotnet(apm_server_url="http://foo").render()["agent-dotnet"]
         self.assertEqual("http://foo", agent["environment"]["ELASTIC_APM_SERVER_URLS"])
 
+    def test_agent_dotnet_with_repo(self):
+        agent = AgentDotnet(dotnet_agent_repo="foo/myrepo.git").render()["agent-dotnet"]
+        self.assertEqual("foo/myrepo.git", agent["build"]["args"]["DOTNET_AGENT_REPO"])
+
+    def test_agent_dotnet_with_branch(self):
+        agent = AgentDotnet(dotnet_agent_version="bar").render()["agent-dotnet"]
+        self.assertEqual("bar", agent["build"]["args"]["DOTNET_AGENT_BRANCH"])
+
+    def test_agent_dotnet_with_release(self):
+        agent = AgentDotnet(dotnet_agent_release="1.0").render()["agent-dotnet"]
+        self.assertEqual("1.0", agent["build"]["args"]["DOTNET_AGENT_VERSION"])
 
 class ApmServerServiceTest(ServiceTest):
     def test_default_snapshot(self):
@@ -299,6 +349,24 @@ class ApmServerServiceTest(ServiceTest):
             self.assertTrue(o in apm_server["command"],
                             "{} not set while output=elasticsearch and overrides set: ".format(o) + " ".join(
                                 apm_server["command"]))
+
+    def test_ilm_default(self):
+        """enable ILM by default in 7.2+"""
+        apm_server = ApmServer(version="6.3.100").render()["apm-server"]
+        self.assertFalse("apm-server.ilm.enabled=true" in
+                         apm_server["command"], "ILM not enabled by default in < 7.2")
+
+        apm_server = ApmServer(version="7.2.0").render()["apm-server"]
+        self.assertTrue("apm-server.ilm.enabled=true" in apm_server["command"],
+                        "ILM enabled by default in = 7.2")
+
+        apm_server = ApmServer(version="7.3.0").render()["apm-server"]
+        self.assertTrue("apm-server.ilm.enabled" not in apm_server["command"],
+                        "ILM auto by default in >= 7.3")
+
+    def test_ilm_disabled(self):
+        apm_server = ApmServer(version="7.2.0", apm_server_ilm_disable=True).render()["apm-server"]
+        self.assertFalse("apm-server.ilm.enabled=true" in apm_server["command"], "ILM enabled but should not be")
 
     def test_logstash_output(self):
         apm_server = ApmServer(version="6.3.100", apm_server_output="logstash").render()["apm-server"]
@@ -357,11 +425,22 @@ class ApmServerServiceTest(ServiceTest):
         )
 
     def test_pipeline(self):
+        def get_pipelines(command):
+            # also checks that output.elasticsearch.pipeline isn't set
+            got = [e.split("=", 1) for e in command if e.startswith("output.elasticsearch.pipeline")]
+            # ensure single output.elasticsearch.pipeline setting, should be output.elasticsearch.pipelines=
+            self.assertEqual(1, len(got))
+            directive, setting = got[0]
+            self.assertEqual("output.elasticsearch.pipelines", directive)
+            return yaml.load(setting)
+
         apm_server = ApmServer(version="6.5.10").render()["apm-server"]
-        self.assertTrue(
-            any(e.startswith("output.elasticsearch.pipelines") for e in apm_server["command"]),
-            "output.elasticsearch.pipelines should be set by default in version >= 6.5"
-        )
+        self.assertEqual(get_pipelines(apm_server["command"]), [{'pipeline': 'apm_user_agent'}],
+                         "output.elasticsearch.pipelines should be set to apm_user_agent in 7.2 > version >= 6.5")
+
+        apm_server = ApmServer(version="7.2.0", apm_server_enable_pipeline=True).render()["apm-server"]
+        self.assertEqual(get_pipelines(apm_server["command"]), [{'pipeline': 'apm'}],
+                         "output.elasticsearch.pipelines should be set to apm in version >= 7.2")
 
         apm_server = ApmServer(version="6.5.10", apm_server_enable_pipeline=False).render()["apm-server"]
         self.assertFalse(
@@ -414,7 +493,7 @@ class ApmServerServiceTest(ServiceTest):
         self.assertIsNone(apm_server.get("image"))
         self.assertDictEqual(apm_server["build"], {
             'args': {'apm_server_base_image': 'docker.elastic.co/apm/apm-server:6.3.100',
-                     'apm_server_branch': 'bar',
+                     'apm_server_branch_or_commit': 'bar',
                      'apm_server_repo': 'foo.git'},
             'context': 'docker/apm-server'})
 
@@ -423,7 +502,7 @@ class ApmServerServiceTest(ServiceTest):
         self.assertIsNone(apm_server.get("image"))
         self.assertDictEqual(apm_server["build"], {
             'args': {'apm_server_base_image': 'docker.elastic.co/apm/apm-server:6.3.100',
-                     'apm_server_branch': 'master',
+                     'apm_server_branch_or_commit': 'master',
                      'apm_server_repo': 'foo.git'},
             'context': 'docker/apm-server'})
 
@@ -455,7 +534,7 @@ class ApmServerServiceTest(ServiceTest):
         apm_server = ApmServer(version="6.3.100", apm_server_version="6.12.0", release=True).render()["apm-server"]
         self.assertEqual(apm_server["image"], "docker.elastic.co/apm/apm-server:6.12.0")
         self.assertEqual(apm_server["image"], "docker.elastic.co/apm/apm-server:6.12.0")
-        self.assertEqual(apm_server["labels"], ["co.elatic.apm.stack-version=6.12.0"])
+        self.assertEqual(apm_server["labels"], ["co.elastic.apm.stack-version=6.12.0"])
 
     def test_dashboards(self):
         apm_server = ApmServer(version="6.3.100", apm_server_dashboards=False).render()["apm-server"]
@@ -469,6 +548,17 @@ class ApmServerServiceTest(ServiceTest):
             any(e.startswith("setup.dashboards.enabled=") for e in apm_server["command"]),
             "setup.dashboards.enabled while enable_kibana=False"
         )
+
+    def test_apm_server_acm(self):
+        apm_server = ApmServer(version="7.3").render()["apm-server"]
+        self.assertTrue("apm-server.kibana.enabled=true" in apm_server["command"],
+                        "APM Server Kbana enabled by default")
+        self.assertTrue("apm-server.kibana.host=kibana:5601" in apm_server["command"],
+                        "APM Server Kibana host set by default")
+
+        apm_server = ApmServer(version="7.3", apm_server_acm_disable=True).render()["apm-server"]
+        self.assertTrue("apm-server.kibana.enabled=false" in apm_server["command"],
+                        "APM Server Kibana disabled when apm_server_disable_kibana=True")
 
 
 class ElasticsearchServiceTest(ServiceTest):
@@ -648,7 +738,7 @@ class KibanaServiceTest(ServiceTest):
                         elasticsearch:
                             condition: service_healthy
                     labels:
-                        - co.elatic.apm.stack-version=6.2.4""")  # noqa: 501
+                        - co.elastic.apm.stack-version=6.2.4""")  # noqa: 501
         )
 
     def test_6_3_release(self):
@@ -678,7 +768,7 @@ class KibanaServiceTest(ServiceTest):
                         elasticsearch:
                             condition: service_healthy
                     labels:
-                        - co.elatic.apm.stack-version=6.3.5""")  # noqa: 501
+                        - co.elastic.apm.stack-version=6.3.5""")  # noqa: 501
         )
 
 
@@ -706,7 +796,7 @@ class LogstashServiceTest(ServiceTest):
                 interval: 10s
                 retries: 12
             image: docker.elastic.co/logstash/logstash:6.3.0
-            labels: [co.elatic.apm.stack-version=6.3.0]
+            labels: [co.elastic.apm.stack-version=6.3.0]
             logging:
                 driver: json-file
                 options: {max-file: '5', max-size: 2m}

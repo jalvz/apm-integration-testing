@@ -1,6 +1,13 @@
 #!/usr/bin/env groovy
-
 @Library('apm@current') _
+
+import groovy.transform.Field
+
+/**
+This is the git commit sha which it's required to be used in different stages.
+It does store the env GIT_BASE_COMMIT
+*/
+@Field def gitBaseCommit
 
 pipeline {
   agent none
@@ -16,7 +23,7 @@ pipeline {
   }
   options {
     timeout(time: 1, unit: 'HOURS')
-    buildDiscarder(logRotator(numToKeepStr: '100', artifactNumToKeepStr: '100', daysToKeepStr: '30'))
+    buildDiscarder(logRotator(numToKeepStr: '100', artifactNumToKeepStr: '100'))
     timestamps()
     ansiColor('xterm')
     disableResume()
@@ -25,7 +32,7 @@ pipeline {
     quietPeriod(10)
   }
   parameters {
-    string(name: 'ELASTIC_STACK_VERSION', defaultValue: "7.0.0", description: "Elastic Stack Git branch/tag to use")
+    string(name: 'ELASTIC_STACK_VERSION', defaultValue: "8.0.0", description: "Elastic Stack Git branch/tag to use")
     string(name: 'BUILD_OPTS', defaultValue: "", description: "Addicional build options to passing compose.py")
     booleanParam(name: 'Run_As_Master_Branch', defaultValue: false, description: 'Allow to run any steps on a PR, some steps normally only run on master branch.')
   }
@@ -34,11 +41,59 @@ pipeline {
      Checkout the code and stash it, to use it on other stages.
     */
     stage('Checkout'){
-      agent { label 'master || immutable' }
+      agent { label 'linux && immutable' }
       steps {
         deleteDir()
         gitCheckout(basedir: "${BASE_DIR}")
         stash allowEmpty: true, name: 'source', useDefaultExcludes: false
+        script {
+          gitBaseCommit = env.GIT_BASE_COMMIT
+        }
+      }
+    }
+
+    stage('Tests'){
+      parallel {
+        /**
+          Validate UTs and lint the app
+        */
+        stage('Unit Tests'){
+          agent { label 'linux && immutable && docker' }
+          options { skipDefaultCheckout() }
+          steps {
+            withGithubNotify(context: 'Unit Tests', tab: 'tests') {
+              deleteDir()
+              unstash 'source'
+              dir("${BASE_DIR}"){
+                sh '.ci/scripts/unit-tests.sh'
+              }
+            }
+          }
+          post {
+            always {
+              junit(allowEmptyResults: true,
+                keepLongStdio: true,
+                testResults: "${BASE_DIR}/**/*junit.xml")
+            }
+          }
+        }
+        stage('Sanity checks') {
+          agent { label 'linux && immutable && docker' }
+          options { skipDefaultCheckout() }
+          environment {
+            PATH = "${env.WORKSPACE}/${env.BASE_DIR}/.ci/scripts:${env.WORKSPACE}/bin:${env.PATH}"
+            HOME = "${env.WORKSPACE}"
+          }
+          steps {
+            withGithubNotify(context: 'Sanity checks', tab: 'tests') {
+              deleteDir()
+              unstash 'source'
+              dir("${BASE_DIR}"){
+                preCommit(commit: "${gitBaseCommit}", junit: true)
+              }
+            }
+          }
+        }
       }
     }
     /**
@@ -76,30 +131,25 @@ pipeline {
     }
   }
   post {
-    success {
-      echoColor(text: '[SUCCESS]', colorfg: 'green', colorbg: 'default')
-    }
-    aborted {
-      echoColor(text: '[ABORTED]', colorfg: 'magenta', colorbg: 'default')
-    }
-    failure {
-      node('master'){
-        echoColor(text: '[FAILURE]', colorfg: 'red', colorbg: 'default')
-        step([$class: 'Mailer', notifyEveryUnstableBuild: true, recipients: "${NOTIFY_TO}", sendToIndividuals: false])
-      }
-    }
-    unstable {
-      echoColor(text: '[UNSTABLE]', colorfg: 'yellow', colorbg: 'default')
+    cleanup {
+      notifyBuildResult()
     }
   }
 }
 
 def runJob(agentName, buildOpts = ''){
-  def job = build(job: 'apm-integration-test-axis-pipeline',
+  def branch = env.BRANCH_NAME
+
+  if (env.CHANGE_ID) {
+    branch = env.CHANGE_TARGET
+  }
+
+  def job = build(job: "apm-integration-test-downstream/${branch}",
     parameters: [
-    string(name: 'agent_integration_test', value: agentName),
+    string(name: 'AGENT_INTEGRATION_TEST', value: agentName),
     string(name: 'ELASTIC_STACK_VERSION', value: params.ELASTIC_STACK_VERSION),
-    string(name: 'INTEGRATION_TESTING_VERSION', value: env.GIT_BASE_COMMIT),
+    string(name: 'INTEGRATION_TESTING_VERSION', value: gitBaseCommit),
+    string(name: 'MERGE_TARGET', value: "${branch}"),
     string(name: 'BUILD_OPTS', value: "${params.BUILD_OPTS} ${buildOpts}"),
     string(name: 'UPSTREAM_BUILD', value: currentBuild.fullDisplayName),
     booleanParam(name: 'DISABLE_BUILD_PARALLEL', value: '')],

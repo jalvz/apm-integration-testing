@@ -1,0 +1,50 @@
+repos:
+-   repo: git://github.com/pre-commit/pre-commit-hooks
+    rev: v2.2.3
+    hooks:
+    -   id: check-case-conflict
+        exclude: ^target/
+    -   id: check-executables-have-shebangs
+        exclude: ^target/
+    -   id: check-json
+        exclude: ^target/
+    -   id: check-merge-conflict
+        exclude: ^target/
+    -   id: check-yaml
+        exclude: ^target/
+    -   id: check-xml
+        exclude: ^target/
+    -   id: end-of-file-fixer
+        exclude: ^target/
+
+-   repo: https://github.com/detailyang/pre-commit-shell.git
+    rev: master
+    hooks:
+    -   id: shell-lint
+        name: "Shellscript: lint"
+        stages: [commit]
+        types: [shell]
+        exclude: (^mvnw$|^target/)
+
+-   repo: https://github.com/adrienverge/yamllint.git
+    rev: master
+    hooks:
+    -   id: yamllint
+        name: "Yaml: lint"
+        args: ['-c','.ci/.yamlint.yml']
+        stages: [commit]
+        types: [yaml]
+        exclude: (^.pre-commit-config.yaml$|^.ci/.yamlint.yml$|^target/)
+
+-   repo: git@github.com:elastic/apm-pipeline-library
+    rev: current
+    hooks:
+    -   id: check-bash-syntax
+    -   id: check-abstract-classes-and-trait
+    -   id: check-jsonslurper-class
+    -   id: check-jenkins-pipelines
+    -   id: check-unicode-non-breaking-spaces
+    -   id: remove-unicode-non-breaking-spaces
+    -   id: check-en-dashes
+    -   id: remove-en-dashes
+    -   id: check-jjbb
