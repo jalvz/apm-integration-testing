@@ -8,8 +8,8 @@ COMPOSE_ARGS ?=
 JUNIT_RESULTS_DIR=tests/results
 JUNIT_OPT=--junitxml $(JUNIT_RESULTS_DIR)
 
-APM_SERVER_URL ?= "http://apm-server:8200"
-ES_URL ?= "http://elasticsearch:9200"
+APM_SERVER_URL ?= "http://localhost:8200"
+ES_URL ?= "http://localhost:9200"
 KIBANA_URL ?= http://kibana:5601
 DJANGO_URL ?= "http://djangoapp:8003"
 DOTNET_URL ?= "http://dotnetapp:8100"
